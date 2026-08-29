@@ -1,136 +1,149 @@
-<!--Copyright 2022 The HuggingFace Team. All rights reserved.
+# Accelerate
 
-Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
-the License. You may obtain a copy of the License at
+[Accelerate](https://hf.co/docs/accelerate/index)는 PyTorch로 모든 종류의 설정에서 분산 학습을 단순화하도록 설계된 라이브러리이며, 가장 일반적인 프레임워크([Fully Sharded Data Parallel (FSDP)](https://pytorch.org/blog/introducing-pytorch-fully-sharded-data-parallel-api/) 및 [DeepSpeed](https://www.deepspeed.ai/))를 단일 인터페이스로 통합합니다. [`Trainer`]는 Accelerate로 구동되며, 대규모 모델을 로드하고 분산 학습을 가능하게 합니다.
 
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
-an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
-specific language governing permissions and limitations under the License.
-
-⚠️ Note that this file is in Markdown but contain specific syntax for our doc-builder (similar to MDX) that may not be
-rendered properly in your Markdown viewer.
-
--->
-
-# 🤗 Accelerate를 활용한 분산 학습[[distributed-training-with-accelerate]]
-
-모델이 커지면서 병렬 처리는 제한된 하드웨어에서 더 큰 모델을 훈련하고 훈련 속도를 몇 배로 가속화하기 위한 전략으로 등장했습니다. Hugging Face에서는 사용자가 하나의 머신에 여러 개의 GPU를 사용하든 여러 머신에 여러 개의 GPU를 사용하든 모든 유형의 분산 설정에서 🤗 Transformers 모델을 쉽게 훈련할 수 있도록 돕기 위해 [🤗 Accelerate](https://huggingface.co/docs/accelerate) 라이브러리를 만들었습니다. 이 튜토리얼에서는 분산 환경에서 훈련할 수 있도록 기본 PyTorch 훈련 루프를 커스터마이즈하는 방법을 알아봅시다.
-
-## 설정[[setup]]
-
-🤗 Accelerate 설치 시작하기:
+이 가이드는 FSDP를 백엔드로 사용하여 Accelerate를 Transformers와 함께 사용하는 두 가지 방법을 보여줍니다. 첫 번째 방법은 [`Trainer`]를 사용한 분산 학습을 보여주고, 두 번째 방법은 PyTorch 학습 루프를 적응시키는 것을 보여줍니다. Accelerate에 대한 자세한 정보는 [설명서](https://hf.co/docs/accelerate/index)를 참조하세요.
 
 ```bash
 pip install accelerate
 ```
 
-그 다음, [`~accelerate.Accelerator`] 객체를 불러오고 생성합니다. [`~accelerate.Accelerator`]는 자동으로 분산 설정 유형을 감지하고 훈련에 필요한 모든 구성 요소를 초기화합니다. 장치에 모델을 명시적으로 배치할 필요는 없습니다.
-
-```py
->>> from accelerate import Accelerator
-
->>> accelerator = Accelerator()
-```
-
-## 가속화를 위한 준비[[prepare-to-accelerate]]
-
-다음 단계는 관련된 모든 훈련 객체를 [`~accelerate.Accelerator.prepare`] 메소드에 전달하는 것입니다. 여기에는 훈련 및 평가 데이터로더, 모델 및 옵티마이저가 포함됩니다:
-
-```py
->>> train_dataloader, eval_dataloader, model, optimizer = accelerator.prepare(
-...     train_dataloader, eval_dataloader, model, optimizer
-... )
-```
-
-## 백워드(Backward)[[backward]]
-
-마지막으로 훈련 루프의 일반적인 `loss.backward()`를 🤗 Accelerate의 [`~accelerate.Accelerator.backward`] 메소드로 대체하기만 하면 됩니다:
-
-```py
->>> for epoch in range(num_epochs):
-...     for batch in train_dataloader:
-...         outputs = model(**batch)
-...         loss = outputs.loss
-...         accelerator.backward(loss)
-
-...         optimizer.step()
-...         lr_scheduler.step()
-...         optimizer.zero_grad()
-...         progress_bar.update(1)
-```
-
-다음 코드에서 볼 수 있듯이, 훈련 루프에 코드 네 줄만 추가하면 분산 학습을 활성화할 수 있습니다!
-
-```diff
-+ from accelerate import Accelerator
-  from transformers import AdamW, AutoModelForSequenceClassification, get_scheduler
-
-+ accelerator = Accelerator()
-
-  model = AutoModelForSequenceClassification.from_pretrained(checkpoint, num_labels=2)
-  optimizer = AdamW(model.parameters(), lr=3e-5)
-
-- device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-- model.to(device)
-
-+ train_dataloader, eval_dataloader, model, optimizer = accelerator.prepare(
-+     train_dataloader, eval_dataloader, model, optimizer
-+ )
-
-  num_epochs = 3
-  num_training_steps = num_epochs * len(train_dataloader)
-  lr_scheduler = get_scheduler(
-      "linear",
-      optimizer=optimizer,
-      num_warmup_steps=0,
-      num_training_steps=num_training_steps
-  )
-
-  progress_bar = tqdm(range(num_training_steps))
-
-  model.train()
-  for epoch in range(num_epochs):
-      for batch in train_dataloader:
--         batch = {k: v.to(device) for k, v in batch.items()}
-          outputs = model(**batch)
-          loss = outputs.loss
--         loss.backward()
-+         accelerator.backward(loss)
-
-          optimizer.step()
-          lr_scheduler.step()
-          optimizer.zero_grad()
-          progress_bar.update(1)
-```
-
-## 학습[[train]]
-
-관련 코드를 추가한 후에는 스크립트나 Colaboratory와 같은 노트북에서 훈련을 시작하세요.
-
-### 스크립트로 학습하기[[train-with-a-script]]
-
-스크립트에서 훈련을 실행하는 경우, 다음 명령을 실행하여 구성 파일을 생성하고 저장합니다:
+명령줄에서 [accelerate config](https://hf.co/docs/accelerate/main/en/package_reference/cli#accelerate-config)를 실행하여 학습 시스템에 대한 일련의 프롬프트에 답변함으로써 시작하세요. 이렇게 하면 설정에 따라 Accelerate가 학습을 올바르게 설정하는 데 도움이 되는 구성 파일이 생성되고 저장됩니다.
 
 ```bash
 accelerate config
 ```
 
-Then launch your training with:
+설정과 제공한 답변에 따라, 한 대의 머신에서 두 개의 GPU로 FSDP 학습을 분산하기 위한 예제 구성 파일은 다음과 같이 보일 수 있습니다.
 
-```bash
-accelerate launch train.py
+```yaml
+compute_environment: LOCAL_MACHINE
+debug: false
+distributed_type: FSDP
+downcast_bf16: 'no'
+fsdp_config:
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  fsdp_backward_prefetch_policy: BACKWARD_PRE
+  fsdp_forward_prefetch: false
+  fsdp_cpu_ram_efficient_loading: true
+  fsdp_offload_params: false
+  fsdp_sharding_strategy: FULL_SHARD
+  fsdp_state_dict_type: SHARDED_STATE_DICT
+  fsdp_sync_module_states: true
+  fsdp_transformer_layer_cls_to_wrap: BertLayer
+  fsdp_use_orig_params: true
+machine_rank: 0
+main_training_function: main
+mixed_precision: bf16
+num_machines: 1
+num_processes: 2
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false
 ```
 
-### 노트북으로 학습하기[[train-with-a-notebook]]
+## Trainer
 
-Collaboratory의 TPU를 사용하려는 경우, 노트북에서도 🤗 Accelerate를 실행할 수 있습니다. 훈련을 담당하는 모든 코드를 함수로 감싸서 [`~accelerate.notebook_launcher`]에 전달하세요:
+저장된 구성 파일의 경로를 [`TrainingArguments`]에 전달한 다음, [`TrainingArguments`]를 [`Trainer`]에 전달하세요.
 
 ```py
->>> from accelerate import notebook_launcher
+from transformers import TrainingArguments, Trainer
 
->>> notebook_launcher(training_function)
+training_args = TrainingArguments(
+    output_dir="your-model",
+    learning_rate=2e-5,
+    per_device_train_batch_size=16,
+    per_device_eval_batch_size=16,
+    num_train_epochs=2,
+    fsdp_config="path/to/fsdp_config",
+    fsdp="full_shard",
+    weight_decay=0.01,
+    eval_strategy="epoch",
+    save_strategy="epoch",
+    load_best_model_at_end=True,
+    push_to_hub=True,
+)
+
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=dataset["train"],
+    eval_dataset=dataset["test"],
+    processing_class=tokenizer,
+    data_collator=data_collator,
+    compute_metrics=compute_metrics,
+)
+
+trainer.train()
 ```
 
-🤗 Accelerate 및 다양한 기능에 대한 자세한 내용은 [documentation](https://huggingface.co/docs/accelerate)를 참조하세요.
+## Native PyTorch
+
+Accelerate는 모든 PyTorch 학습 루프에 추가되어 분산 학습을 가능하게 할 수 있습니다. [`~accelerate.Accelerator`]는 PyTorch 코드를 Accelerate와 함께 작동하도록 적응시키기 위한 주요 진입점입니다. 분산 학습 설정을 자동으로 감지하고 학습에 필요한 모든 구성 요소를 초기화합니다. 모델을 장치에 명시적으로 배치할 필요가 없습니다. [`~accelerate.Accelerator`]는 모델을 어느 장치로 이동할지 알고 있습니다.
+
+```py
+from accelerate import Accelerator
+
+accelerator = Accelerator()
+device = accelerator.device
+```
+
+이제 모든 PyTorch 객체(모델, 옵티마이저, 스케줄러, 데이터로더)를 [`~accelerate.Accelerator.prepare`] 메소드에 전달해야 합니다. 이 메소드는 모델을 적절한 장치 또는 장치로 이동하고, 옵티마이저와 스케줄러를 [`~accelerate.optimizer.AcceleratedOptimizer`] 및 [`~accelerate.scheduler.AcceleratedScheduler`]를 사용하도록 적응시키며, 새로운 샤드 가능한 데이터로더를 생성합니다.
+
+```py
+train_dataloader, eval_dataloader, model, optimizer = accelerator.prepare(
+    train_dataloader, eval_dataloader, model, optimizer
+)
+```
+
+학습 루프에서 `loss.backward`를 Accelerate의 [`~accelerate.Accelerator.backward`] 메소드로 바꾸어 그레이디언트를 스케일링하고 프레임워크(예: DeepSpeed 또는 Megatron)에 따라 적절한 `backward` 메소드를 결정하세요.
+
+```py
+for epoch in range(num_epochs):
+    for batch in train_dataloader:
+        outputs = model(**batch)
+        loss = outputs.loss
+        accelerator.backward(loss)
+        optimizer.step()
+        lr_scheduler.step()
+        optimizer.zero_grad()
+        progress_bar.update(1)
+```
+
+모든 것을 함수로 결합하고 스크립트로 호출할 수 있도록 만드세요.
+
+```py
+from accelerate import Accelerator
+  
+def main():
+  accelerator = Accelerator()
+
+  model, optimizer, training_dataloader, scheduler = accelerator.prepare(
+      model, optimizer, training_dataloader, scheduler
+  )
+
+  for batch in training_dataloader:
+      optimizer.zero_grad()
+      inputs, targets = batch
+      outputs = model(inputs)
+      loss = loss_function(outputs, targets)
+      accelerator.backward(loss)
+      optimizer.step()
+      scheduler.step()
+
+if __name__ == "__main__":
+    main()
+```
+
+명령줄에서 [accelerate launch](https://hf.co/docs/accelerate/main/en/package_reference/cli#accelerate-launch)를 호출하여 학습 스크립트를 실행하세요. 추가 인수나 매개변수를 여기에 전달할 수 있습니다.
+
+학습 스크립트를 두 개의 GPU에서 시작하려면 `--num_processes` 인수를 추가하세요.
+
+```bash
+accelerate launch --num_processes=2 your_script.py
+```
+
+자세한 내용은 [Launching Accelerate scripts](https://hf.co/docs/accelerate/main/en/basic_tutorials/launch)를 참조하세요.
